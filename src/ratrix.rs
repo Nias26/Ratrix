@@ -1,76 +1,100 @@
-// mod ratrix {
-//     pub struct Screen {}
-//
-//     impl Screen {
-//         pub fn enter() {
-//
-//         }
-//     }
-// }
-
-use crossterm::{
-    cursor::MoveTo,
-    execute,
-    terminal::{Clear, ClearType},
+use crossterm::{cursor::MoveTo, execute, terminal};
+use rand::{
+    Rng,
+    distr::{Distribution, Uniform},
 };
-use rand::Rng;
 use std::{
     io::stdout,
     sync::{Arc, RwLock},
-    thread::{self, sleep},
-    time,
+    thread, time,
 };
 
-#[derive(Debug)]
-struct Particle {
-    char: char,
-    lenght: u32,
+// NOTE: Every column of the matrx will have a thread wich is responable for
+// the printing and writing of it.
+// A thread must create a head char after some random amount of inactive time and
+// generate a random length for that column. It will print the characters as it
+// generates them, thus avoiding to block on the generation of the tail.
+// The matrix will be a thread pool just like in the film (how cool's that!).
+
+struct Matrix {
+    matrix: Vec<RwLock<Vec<char>>>,
+    height: u16,
+    width: u16,
+    speed: time::Duration,
 }
 
-const HEIGHT: usize = 20;
-const WIDTH: usize = 40;
-const SPEED: time::Duration = time::Duration::from_millis(100);
+impl Matrix {
+    fn new() -> Matrix {
+        let (width, mut height) = terminal::size().unwrap();
+        height += 1;
+        let mut vetrix = Vec::new();
+        vetrix.resize_with(width.into(), || RwLock::new(vec![' '; height.into()]));
+        Matrix {
+            matrix: vetrix,
+            height,
+            width,
+            speed: time::Duration::from_millis(100),
+        }
+    }
+}
 
-fn print_matrix(matrix: &Arc<RwLock<Vec<Vec<char>>>>) {
+fn print_matrix(matrix: Arc<Matrix>) {
     let mut row = 0;
-    for _ in 0..HEIGHT {
-        for col in matrix.read().unwrap().iter() {
-            print!("{}", col[row]);
+    for _ in 0..matrix.height {
+        for col in matrix.matrix.iter() {
+            print!("{}", col.read().unwrap()[row]);
         }
         row += 1;
         println!();
     }
 }
 
-fn spawn_chars(matrix: Arc<RwLock<Vec<Vec<char>>>>, chars: Vec<char>) {
+fn spawn_chars(matrix: Arc<Matrix>, chars: Vec<char>) {
     thread::spawn(move || {
         let mut rng = rand::rng();
-        for col in matrix.write().unwrap().iter_mut() {
+        let distrib = Uniform::new(0, matrix.width).unwrap();
+        loop {
+            let i = distrib.sample(&mut rng);
+            matrix.matrix[i as usize].write().unwrap()[0] = chars[rng.random_range(0..chars.len())];
             thread::sleep(time::Duration::from_millis(rng.random_range(0..=100)));
-            col[0] = chars[rng.random_range(0..chars.len())];
         }
     });
 }
 
-// TODO: Fix mutex by moving it from the master vector to the child ones
+fn rotate_matrix(matrix: Arc<Matrix>) {
+    thread::spawn(move || {
+        loop {
+            for lockd_row in matrix.matrix.iter() {
+                let mut row = lockd_row.write().unwrap();
+                row.rotate_right(1);
+                let len = row.len() - 1;
+                row[len] = ' ';
+            }
+            thread::sleep(matrix.speed);
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // prepare the matrix
-    // let mut matrix: Vec<Vec<&str>> = vec![vec![" "; HEIGHT]; WIDTH];
-    let matrix = Arc::new(RwLock::new(vec![vec![' '; HEIGHT]; WIDTH]));
+    let matrix = Arc::new(Matrix::new());
     let chars = vec![
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
         'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
-        'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+        'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', ',', '.',
+        '<', '>', '\'', '\'', ';', ':', '[', ']', '{', '}', '-', '_', '=', '+', '\\', '|', '/',
+        '?', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')',
     ];
 
+    spawn_chars(matrix.clone(), chars.clone());
+    rotate_matrix(matrix.clone());
     loop {
-        spawn_chars(matrix.clone(), chars.clone());
-        for row in matrix.write().unwrap().iter_mut() {
-            row.rotate_right(1);
-        }
-
-        execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
-        let _ = print_matrix(&matrix);
-        sleep(SPEED);
+        execute!(
+            stdout(),
+            terminal::Clear(terminal::ClearType::All),
+            MoveTo(0, 0)
+        )?;
+        print_matrix(matrix.clone());
+        thread::sleep(matrix.speed);
     }
 }
