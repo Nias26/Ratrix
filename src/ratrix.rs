@@ -25,12 +25,11 @@ struct Matrix {
 
 impl Matrix {
     fn new() -> Matrix {
-        let (width, mut height) = terminal::size().unwrap();
-        height += 1;
-        let mut vetrix = Vec::new();
-        vetrix.resize_with(width.into(), || RwLock::new(vec![' '; height.into()]));
+        let (width, height) = terminal::size().unwrap();
+        let mut matrix = Vec::new();
+        matrix.resize_with(width.into(), || RwLock::new(vec![' '; height.into()]));
         Matrix {
-            matrix: vetrix,
+            matrix,
             height,
             width,
             speed: time::Duration::from_millis(100),
@@ -55,7 +54,9 @@ fn spawn_chars(matrix: Arc<Matrix>, chars: Vec<char>) {
         let distrib = Uniform::new(0, matrix.width).unwrap();
         loop {
             let i = distrib.sample(&mut rng);
-            matrix.matrix[i as usize].write().unwrap()[0] = chars[rng.random_range(0..chars.len())];
+            let mut col = matrix.matrix[i as usize].write().unwrap();
+            col[0] = chars[rng.random_range(0..chars.len())];
+
             thread::sleep(time::Duration::from_millis(rng.random_range(0..=100)));
         }
     });
