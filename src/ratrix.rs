@@ -1,101 +1,188 @@
-use crossterm::{cursor::MoveTo, execute, terminal};
-use rand::{
-    Rng,
-    distr::{Distribution, Uniform},
-};
 use std::{
-    io::stdout,
-    sync::{Arc, RwLock},
-    thread, time,
+    char::TryFromCharError,
+    io::{self, BufWriter, Write},
+    time::{Duration, Instant},
 };
 
-// NOTE: Every column of the matrx will have a thread wich is responable for
-// the printing and writing of it.
-// A thread must create a head char after some random amount of inactive time and
-// generate a random length for that column. It will print the characters as it
-// generates them, thus avoiding to block on the generation of the tail.
-// The matrix will be a thread pool just like in the film (how cool's that!).
+use crossterm::{
+    cursor, event, execute, queue,
+    style::{Color, Print, Stylize},
+    terminal::{self, size},
+};
+use rand::Rng;
 
-struct Matrix {
-    matrix: Vec<RwLock<Vec<char>>>,
-    height: u16,
-    width: u16,
-    speed: time::Duration,
+/*
+ *  From the Matrx, we delcare the number of spaces between lines, the lenght of the line and how
+ *  many times must be updated making it faster. From the top we scroll down to the bottom row and
+ *  if we found a tail, we scan for the last character and if we are still in the range of the
+ *  length of the line and the row, we can add a new character after and if there is another line on
+ *  the top, we start srinking le old one and let the new one scroll over the rows.
+ */
+
+#[derive(Clone, Copy)]
+struct Particle {
+    is_head: bool,
+    char: char,
 }
 
-impl Matrix {
-    fn new() -> Matrix {
-        let (width, height) = terminal::size().unwrap();
-        let mut matrix = Vec::new();
-        matrix.resize_with(width.into(), || RwLock::new(vec![' '; height.into()]));
-        Matrix {
-            matrix,
-            height,
-            width,
-            speed: time::Duration::from_millis(100),
-        }
-    }
+struct Ratrix {
+    cols: u16,
+    rows: u16,
+    matrix: Vec<Vec<Particle>>,
+    lengths: Vec<u16>, // Length of each 'line'
+    spaces: Vec<u16>,  // Gap between 'lines'
+    updates: Vec<u16>, // Speed of every column
+    count: u16,        // Counter
 }
 
-fn print_matrix(matrix: Arc<Matrix>) {
-    let mut row = 0;
-    for _ in 0..matrix.height {
-        for col in matrix.matrix.iter() {
-            print!("{}", col.read().unwrap()[row]);
-        }
-        row += 1;
-        println!();
-    }
-}
+impl Ratrix {
+    fn new() -> Ratrix {
+        let (cols, rows) = size().unwrap_or((80, 24));
+        let matrix = vec![
+            vec![
+                Particle {
+                    is_head: false,
+                    char: ' '
+                };
+                cols.into()
+            ];
+            rows.into()
+        ];
 
-fn spawn_chars(matrix: Arc<Matrix>, chars: Vec<char>) {
-    thread::spawn(move || {
         let mut rng = rand::rng();
-        let distrib = Uniform::new(0, matrix.width).unwrap();
-        loop {
-            let i = distrib.sample(&mut rng);
-            let mut col = matrix.matrix[i as usize].write().unwrap();
-            col[0] = chars[rng.random_range(0..chars.len())];
 
-            thread::sleep(time::Duration::from_millis(rng.random_range(0..=100)));
+        let lengths = (0..cols)
+            .map(|_| rng.random_range(3..rows.max(5)))
+            .collect();
+        let spaces = (0..cols)
+            .map(|_| rng.random_range(1..rows.max(5)))
+            .collect();
+        let updates = (0..cols).map(|_| rng.random_range(1..4)).collect();
+
+        Ratrix {
+            cols,
+            rows,
+            matrix,
+            lengths,
+            spaces,
+            updates,
+            count: 0,
         }
-    });
-}
-
-fn rotate_matrix(matrix: Arc<Matrix>) {
-    thread::spawn(move || {
-        loop {
-            for lockd_row in matrix.matrix.iter() {
-                let mut row = lockd_row.write().unwrap();
-                row.rotate_right(1);
-                let len = row.len() - 1;
-                row[len] = ' ';
-            }
-            thread::sleep(matrix.speed);
-        }
-    });
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // prepare the matrix
-    let matrix = Arc::new(Matrix::new());
-    let chars = vec![
-        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
-        'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
-        'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', ',', '.',
-        '<', '>', '\'', '\'', ';', ':', '[', ']', '{', '}', '-', '_', '=', '+', '\\', '|', '/',
-        '?', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')',
-    ];
-
-    spawn_chars(matrix.clone(), chars.clone());
-    rotate_matrix(matrix.clone());
-    loop {
-        execute!(
-            stdout(),
-            terminal::Clear(terminal::ClearType::All),
-            MoveTo(0, 0)
-        )?;
-        print_matrix(matrix.clone());
-        thread::sleep(matrix.speed);
     }
+
+    fn update(&mut self) {
+        let mut rng = rand::rng();
+        self.count = if self.count >= 4 { 1 } else { self.count + 1 };
+
+        for j in (0..self.cols).step_by(2) {
+            let col_index = j as usize;
+            if self.count > self.updates[col_index] {
+                let mut i = 0;
+                let mut first_col_done = false;
+
+                // Skip spaces
+                while i < self.rows as usize {
+                    while i < self.rows as usize && self.matrix[i][col_index].char == ' ' {
+                        i += 1;
+                    }
+
+                    // Generate new line if arrived at bottom
+                    if i >= self.rows as usize {
+                        // Consume the spaces
+                        if self.spaces[col_index] > 0 {
+                            self.spaces[col_index] -= 1;
+                        } else {
+                            self.matrix[0][col_index].char =
+                                rng.random_range(33..123) as u8 as char;
+                            self.matrix[0][col_index].is_head = true;
+                            self.lengths[col_index] = rng.random_range(3..self.rows.max(5));
+                            self.spaces[col_index] = rng.random_range(1..self.rows.max(5));
+                        }
+                        break;
+                    }
+
+                    // Found a line, tracing it...
+                    let head_start = i;
+                    let mut line_lenght = 0;
+                    while i < self.rows as usize && self.matrix[i][col_index].char != ' ' {
+                        self.matrix[i][col_index].is_head = false;
+                        i += 1;
+                        line_lenght += 1;
+                    }
+
+                    // Generate a new head if we have space left
+                    if i < self.rows as usize {
+                        self.matrix[i][col_index].char = rng.random_range(33..123) as u8 as char;
+                        self.matrix[i][col_index].is_head = true;
+
+                        // Erase tail of the line if too long or a new line is formed
+                        if line_lenght > self.lengths[col_index] || first_col_done {
+                            self.matrix[head_start][col_index].char = ' ';
+                        }
+                        first_col_done = true;
+                        i += 1;
+                    } else {
+                        self.matrix[head_start][col_index].char = ' ';
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        for j in (0..self.cols).step_by(2) {
+            let col_index = j as usize;
+            if self.count > self.updates[col_index] {
+                for i in 0..self.rows {
+                    let p = self.matrix[i as usize][j as usize];
+                    queue!(w, cursor::MoveTo(j, i))?;
+
+                    if p.char == ' ' {
+                        queue!(w, Print(" "))?;
+                    } else if p.is_head {
+                        queue!(w, Print(p.char.with(Color::White).bold()))?;
+                    } else {
+                        queue!(w, Print(p.char.with(Color::Green)))?;
+                    }
+                }
+            }
+        }
+        w.flush()
+    }
+}
+
+fn main() -> io::Result<()> {
+    // Setup Terminal
+    terminal::enable_raw_mode()?;
+    let mut stdout = BufWriter::with_capacity(128 * 1024, io::stdout());
+    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+
+    let mut ratrix = Ratrix::new();
+    let frame_duration = Duration::from_millis(20);
+
+    loop {
+        let start = Instant::now();
+        // Quit if 'q' is pressed
+        if event::poll(Duration::from_millis(0))? {
+            if let event::Event::Key(key) = event::read()? {
+                if key.code == event::KeyCode::Char('q') {
+                    break;
+                }
+            }
+        }
+
+        ratrix.update();
+        ratrix.draw(&mut stdout)?;
+
+        // Keep a constant framerate
+        let elapsed = start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    // Restore Terminal
+    execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen)?;
+    terminal::disable_raw_mode()?;
+    Ok(())
 }
