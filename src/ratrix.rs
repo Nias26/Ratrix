@@ -1,5 +1,4 @@
 use std::{
-    char::TryFromCharError,
     io::{self, BufWriter, Write},
     time::{Duration, Instant},
 };
@@ -7,7 +6,7 @@ use std::{
 use crossterm::{
     cursor, event, execute, queue,
     style::{Color, Print, Stylize},
-    terminal::{self, size},
+    terminal,
 };
 use rand::Rng;
 
@@ -37,7 +36,7 @@ struct Ratrix {
 
 impl Ratrix {
     fn new() -> Ratrix {
-        let (cols, rows) = size().unwrap_or((80, 24));
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let matrix = vec![
             vec![
                 Particle {
